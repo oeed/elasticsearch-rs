@@ -5917,6 +5917,8 @@ pub enum SearchParts<'b> {
     None,
     #[doc = "Index"]
     Index(&'b [&'b str]),
+    #[doc = "Single index"]
+    SingleIndex(&'b str),
     #[doc = "Index and Type"]
     IndexType(&'b [&'b str], &'b [&'b str]),
 }
@@ -5927,14 +5929,17 @@ impl<'b> SearchParts<'b> {
             SearchParts::None => "/_search".into(),
             SearchParts::Index(ref index) => {
                 let index_str = index.join(",");
-                let encoded_index: Cow<str> =
-                    percent_encode(index_str.as_bytes(), PARTS_ENCODED).into();
-                let mut p = String::with_capacity(9usize + encoded_index.len());
-                p.push_str("/");
-                p.push_str(encoded_index.as_ref());
-                p.push_str("/_search");
-                p.into()
-            }
+                SearchParts::SingleIndex(&index_str).url()
+            },
+            SearchParts::SingleIndex(ref index) => {
+              let encoded_index: Cow<str> =
+                  percent_encode(index.as_bytes(), PARTS_ENCODED).into();
+              let mut p = String::with_capacity(9usize + encoded_index.len());
+              p.push_str("/");
+              p.push_str(encoded_index.as_ref());
+              p.push_str("/_search");
+              p.into()
+          }
             SearchParts::IndexType(ref index, ref ty) => {
                 let index_str = index.join(",");
                 let ty_str = ty.join(",");
