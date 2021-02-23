@@ -61,7 +61,7 @@
 //!
 //! ```toml,no_run
 //! [dependencies]
-//! elasticsearch = "7.10.0-alpha.1"
+//! elasticsearch = "7.11.0-alpha.1"
 //! ```
 //! The following _optional_ dependencies may also be useful to create requests and read responses
 //!
@@ -362,25 +362,32 @@ pub mod params;
 // Generated code - do not edit until the next GENERATED-END marker
 
 pub mod async_search;
+pub mod autoscaling;
 pub mod cat;
 pub mod ccr;
 pub mod cluster;
 pub mod dangling_indices;
 pub mod enrich;
+pub mod eql;
 pub mod graph;
 pub mod ilm;
 pub mod indices;
 pub mod ingest;
 pub mod license;
+pub mod logstash;
 pub mod migration;
 pub mod ml;
+pub mod monitoring;
 pub mod nodes;
+pub mod rollup;
+pub mod searchable_snapshots;
 pub mod security;
 pub mod slm;
 pub mod snapshot;
 pub mod sql;
 pub mod ssl;
 pub mod tasks;
+pub mod text_structure;
 pub mod transform;
 pub mod watcher;
 pub mod xpack;

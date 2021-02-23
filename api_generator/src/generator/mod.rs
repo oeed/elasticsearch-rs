@@ -34,14 +34,17 @@ use std::{
 };
 
 #[cfg(test)]
-use quote::{ToTokens, Tokens};
+use quote::ToTokens;
+use quote::Tokens;
 use semver::Version;
 use void::Void;
 
 pub mod code_gen;
 pub mod output;
 
+use itertools::Itertools;
 use output::{merge_file, write_file};
+use std::cmp::Ordering;
 
 lazy_static! {
     static ref VERSION: Version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
@@ -63,9 +66,9 @@ pub struct Api {
     /// parameters that are common to all API methods
     pub common_params: BTreeMap<String, Type>,
     /// root API methods e.g. Search, Index
-    pub root: BTreeMap<String, ApiEndpoint>,
+    pub root: ApiNamespace,
     /// namespace client methods e.g. Indices.Create, Ml.PutJob
-    pub namespaces: BTreeMap<String, BTreeMap<String, ApiEndpoint>>,
+    pub namespaces: BTreeMap<String, ApiNamespace>,
     /// enums in parameters
     pub enums: Vec<ApiEnum>,
 }
@@ -79,9 +82,9 @@ impl Api {
     pub fn endpoint_for_api_call(&self, api_call: &str) -> Option<&ApiEndpoint> {
         let api_call_path: Vec<&str> = api_call.split('.').collect();
         match api_call_path.len() {
-            1 => self.root.get(api_call_path[0]),
+            1 => self.root.endpoints().get(api_call_path[0]),
             _ => match self.namespaces.get(api_call_path[0]) {
-                Some(namespace) => namespace.get(api_call_path[1]),
+                Some(namespace) => namespace.endpoints().get(api_call_path[1]),
                 None => None,
             },
         }
@@ -202,6 +205,37 @@ impl Default for TypeKind {
 pub struct Deprecated {
     pub version: String,
     pub description: String,
+}
+
+impl PartialOrd for Deprecated {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (
+            Version::parse(&self.version),
+            Version::parse(&other.version),
+        ) {
+            (Err(_), _) => None,
+            (_, Err(_)) => None,
+            (Ok(self_version), Ok(other_version)) => self_version.partial_cmp(&other_version),
+        }
+    }
+}
+
+impl Deprecated {
+    /// Combine optional deprecations, keeping either lack of deprecation or the highest version
+    pub fn combine<'a>(
+        left: &'a Option<Deprecated>,
+        right: &'a Option<Deprecated>,
+    ) -> &'a Option<Deprecated> {
+        if let (Some(leftd), Some(rightd)) = (left, right) {
+            if leftd > rightd {
+                left
+            } else {
+                right
+            }
+        } else {
+            &None
+        }
+    }
 }
 
 /// An API url path
@@ -347,14 +381,51 @@ where
     deserializer.deserialize_any(StringOrStruct(PhantomData))
 }
 
+/// Stability level of an API endpoint. Ordering defines increasing stability level, i.e.
+/// `beta` is "more stable" than `experimental`.
+#[derive(Debug, Eq, PartialEq, Deserialize, Clone, Copy, Ord, PartialOrd)]
+pub enum Stability {
+    #[serde(rename = "experimental")]
+    Experimental,
+    #[serde(rename = "beta")]
+    Beta,
+    #[serde(rename = "stable")]
+    Stable,
+}
+
+impl Stability {
+    pub fn feature_name(self) -> Option<&'static str> {
+        match self {
+            Stability::Experimental => Some("experimental-apis"),
+            Stability::Beta => Some("beta-apis"),
+            Stability::Stable => None,
+        }
+    }
+
+    /// Returns the (optional) feature configuration for this stability level as an outer
+    /// attribute, for use e.g. on function definitions.
+    pub fn outer_cfg_attr(self) -> Option<Tokens> {
+        let feature_name = self.feature_name();
+        feature_name.map(|name| quote!(#[cfg(feature = #name)]))
+    }
+
+    /// Returns the (optional) feature configuration for this stability level as an inner
+    /// attribute, for use e.g. at the top of a module source file
+    pub fn inner_cfg_attr(self) -> Option<Tokens> {
+        let feature_name = self.feature_name();
+        feature_name.map(|name| quote!(#![cfg(feature = #name)]))
+    }
+}
+
 /// An API endpoint defined in the REST API specs
 #[derive(Debug, PartialEq, Deserialize, Clone)]
 pub struct ApiEndpoint {
     pub full_name: Option<String>,
     #[serde(deserialize_with = "string_or_struct")]
     documentation: Documentation,
-    pub stability: String,
+    pub stability: Stability,
     pub url: Url,
+    pub deprecated: Option<Deprecated>,
     #[serde(default = "BTreeMap::new")]
     pub params: BTreeMap<String, Type>,
     pub body: Option<Body>,
@@ -382,6 +453,34 @@ impl ApiEndpoint {
     }
 }
 
+pub struct ApiNamespace {
+    stability: Stability,
+    endpoints: BTreeMap<String, ApiEndpoint>,
+}
+
+impl ApiNamespace {
+    pub fn new() -> Self {
+        ApiNamespace {
+            stability: Stability::Experimental, // will grow in stability as we add endpoints
+            endpoints: BTreeMap::new(),
+        }
+    }
+
+    pub fn add(&mut self, name: String, endpoint: ApiEndpoint) {
+        // Stability of a namespace is that of the most stable of its endpoints
+        self.stability = Stability::max(self.stability, endpoint.stability);
+        self.endpoints.insert(name, endpoint);
+    }
+
+    pub fn stability(&self) -> Stability {
+        self.stability
+    }
+
+    pub fn endpoints(&self) -> &BTreeMap<String, ApiEndpoint> {
+        &self.endpoints
+    }
+}
+
 /// Common parameters accepted by all API endpoints
 #[derive(Debug, PartialEq, Deserialize, Clone)]
 pub struct Common {
@@ -396,6 +495,7 @@ pub struct ApiEnum {
     pub name: String,
     pub description: Option<String>,
     pub values: Vec<String>,
+    pub stability: Stability, // inherited from the declaring API
 }
 
 impl Hash for ApiEnum {
@@ -499,7 +599,7 @@ pub use bulk::*;
 /// Reads Api from a directory of REST Api specs
 pub fn read_api(branch: &str, download_dir: &PathBuf) -> Result<Api, failure::Error> {
     let paths = fs::read_dir(download_dir)?;
-    let mut namespaces = BTreeMap::new();
+    let mut namespaces = BTreeMap::<String, ApiNamespace>::new();
     let mut enums: HashSet<ApiEnum> = HashSet::new();
     let mut common_params = BTreeMap::new();
     let root_key = "root";
@@ -517,8 +617,8 @@ pub fn read_api(branch: &str, download_dir: &PathBuf) -> Result<Api, failure::Er
             let mut file = File::open(&path)?;
             let (name, api_endpoint) = endpoint_from_file(display, &mut file)?;
 
-            // Only generate builders and methods for stable APIs, not experimental or beta
-            if &api_endpoint.stability != "stable" {
+            if api_endpoint.stability != Stability::Stable && api_endpoint.deprecated.is_some() {
+                // Do not generate deprecated unstable endpoints
                 continue;
             }
 
@@ -545,19 +645,20 @@ pub fn read_api(branch: &str, download_dir: &PathBuf) -> Result<Api, failure::Er
                     name: param.0.to_string(),
                     description: param.1.description.clone(),
                     values: options,
+                    stability: api_endpoint.stability,
                 });
             }
 
             // collect api endpoints into namespaces
             if !namespaces.contains_key(&namespace) {
-                let mut api_endpoints = BTreeMap::new();
-                api_endpoints.insert(method_name, api_endpoint);
-                namespaces.insert(namespace.to_string(), api_endpoints);
+                let mut api_namespace = ApiNamespace::new();
+                api_namespace.add(method_name, api_endpoint);
+                namespaces.insert(namespace.to_string(), api_namespace);
             } else {
                 namespaces
                     .get_mut(&namespace)
                     .unwrap()
-                    .insert(method_name, api_endpoint);
+                    .add(method_name, api_endpoint);
             }
         } else if name
             .map(|name| name == Some("_common.json"))
@@ -593,21 +694,37 @@ where
     R: Read,
 {
     // deserialize the map from the reader
-    let endpoint: BTreeMap<String, ApiEndpoint> =
+    let endpoints: BTreeMap<String, ApiEndpoint> =
         serde_json::from_reader(reader).map_err(|e| super::error::ParseError {
             message: format!("Failed to parse {} because: {}", name, e),
         })?;
 
     // get the first (and only) endpoint name and endpoint body
-    let mut first_endpoint = endpoint.into_iter().next().unwrap();
-    first_endpoint.1.full_name = Some(first_endpoint.0.clone());
+    let (name, mut endpoint) = endpoints.into_iter().next().unwrap();
+    endpoint.full_name = Some(name.clone());
 
     // sort the HTTP methods so that we can easily pattern match on them later
-    for path in first_endpoint.1.url.paths.iter_mut() {
+    for path in endpoint.url.paths.iter_mut() {
         path.methods.sort();
     }
 
-    Ok(first_endpoint)
+    // endpoint deprecation is the "least deprecated" of its paths
+    let deprecation = endpoint
+        .url
+        .paths
+        .iter()
+        .map(|p| &p.deprecated)
+        .fold1(|d1, d2| Deprecated::combine(d1, d2))
+        .unwrap_or(&None);
+
+    if let Some(deprecated) = deprecation {
+        endpoint.deprecated = Some(Deprecated {
+            version: deprecated.version.clone(),
+            description: "Deprecated via one of the child items".to_string(),
+        })
+    }
+
+    Ok((name, endpoint))
 }
 
 /// deserializes Common from a file
@@ -626,4 +743,31 @@ where
 #[cfg(test)]
 pub fn ast_eq<T: ToTokens>(expected: Tokens, actual: T) {
     assert_eq!(expected, quote!(#actual));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stability_ordering() {
+        assert!(Stability::Beta > Stability::Experimental);
+        assert!(Stability::Stable > Stability::Beta);
+    }
+
+    #[test]
+    fn combine_deprecations() {
+        let d1 = Some(Deprecated {
+            version: "7.5.0".to_string(),
+            description: "foo".to_string(),
+        });
+
+        let d2 = Some(Deprecated {
+            version: "7.6.0".to_string(),
+            description: "foo".to_string(),
+        });
+
+        assert_eq!(&d2, Deprecated::combine(&d1, &d2));
+        assert_eq!(&None, Deprecated::combine(&d1, &None));
+    }
 }

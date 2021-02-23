@@ -25,7 +25,6 @@ use regex::Regex;
 use semver::Version;
 use serde::Deserialize;
 use std::{
-    borrow::Borrow,
     collections::{BTreeMap, HashSet},
     fs,
     fs::{File, OpenOptions},
@@ -37,7 +36,7 @@ use yaml_rust::{Yaml, YamlLoader};
 /// The test suite to compile
 #[derive(Debug, PartialEq)]
 pub enum TestSuite {
-    Oss,
+    Free,
     XPack,
 }
 
@@ -122,7 +121,7 @@ impl<'a> YamlTests<'a> {
         let (setup_fn, setup_call) = Self::generate_fixture(&self.setup);
         let (teardown_fn, teardown_call) = Self::generate_fixture(&self.teardown);
         let general_setup_call = match self.suite {
-            TestSuite::Oss => quote!(client::general_oss_setup().await?;),
+            TestSuite::Free => quote!(client::general_oss_setup().await?;),
             TestSuite::XPack => quote!(client::general_xpack_setup().await?;),
         };
 
@@ -170,16 +169,11 @@ impl<'a> YamlTests<'a> {
 
     /// Whether the test should be skipped
     fn skip_test(&self, name: &str) -> bool {
-        if self.skip.tests.contains_key(self.path.as_str()) {
-            let tests = self.skip.tests.get(self.path.as_str());
-
-            return match tests {
-                Some(t) => t.contains(name.to_string().borrow()),
-                None => true,
-            };
+        if let Some(tests) = self.skip.tests.get(&self.path) {
+            tests.iter().any(|n| n == name || n == "*")
+        } else {
+            false
         }
-
-        false
     }
 
     fn fn_impls(
@@ -412,18 +406,14 @@ pub fn generate_tests_from_yaml(
                         }
 
                         match top_dir.as_str() {
-                            "oss" => TestSuite::Oss,
+                            "free" => TestSuite::Free,
                             "xpack" => TestSuite::XPack,
-                            _ => panic!("Unknown test suite"),
+                            _ => panic!("Unknown test suite {:?}", path),
                         }
                     };
 
                     if &test_suite != suite {
-                        info!(
-                            "skipping {}. compiling tests for {:?}",
-                            relative_path.to_slash_lossy(),
-                            suite
-                        );
+                        // Belongs to another test suite
                         continue;
                     }
 
@@ -490,13 +480,13 @@ pub fn generate_tests_from_yaml(
         }
     }
 
-    write_mod_files(&generated_dir)?;
+    write_mod_files(&generated_dir, true)?;
 
     Ok(())
 }
 
 /// Writes a mod.rs file in each generated directory
-fn write_mod_files(generated_dir: &PathBuf) -> Result<(), failure::Error> {
+fn write_mod_files(generated_dir: &PathBuf, toplevel: bool) -> Result<(), failure::Error> {
     if !generated_dir.exists() {
         fs::create_dir(generated_dir)?;
     }
@@ -505,28 +495,32 @@ fn write_mod_files(generated_dir: &PathBuf) -> Result<(), failure::Error> {
     let mut mods = vec![];
     for path in paths {
         if let Ok(entry) = path {
-            let file_type = entry.file_type().unwrap();
             let path = entry.path();
             let name = path.file_stem().unwrap().to_string_lossy();
 
-            let is_tests_common_dir =
-                name.as_ref() == "common" && path.parent().unwrap().file_name().unwrap() == "tests";
-
-            if name.as_ref() != "mod" {
-                if is_tests_common_dir {
-                    mods.push("#[macro_use]".to_string());
-                }
-
+            if name != "mod" {
                 mods.push(format!(
                     "pub mod {};",
                     path.file_stem().unwrap().to_string_lossy()
                 ));
             }
 
-            if file_type.is_dir() && !is_tests_common_dir {
-                write_mod_files(&entry.path())?;
+            if path.is_dir() && !(toplevel && name == "common") {
+                write_mod_files(&entry.path(), false)?;
             }
         }
+    }
+
+    // Make sure we have a stable output
+    mods.sort();
+
+    if toplevel {
+        // The "common" module must appear first so that its macros are parsed before the
+        // compiler visits other modules, otherwise we'll have "macro not found" errors.
+        mods.retain(|name| name != "pub mod common;");
+        mods.insert(0, "#[macro_use]".into());
+        mods.insert(1, "pub mod common;".into());
+        mods.insert(2, "".into());
     }
 
     let mut path = generated_dir.clone();
@@ -562,6 +556,14 @@ fn write_test_file(
     relative_path: &Path,
     generated_dir: &PathBuf,
 ) -> Result<(), failure::Error> {
+    if test.skip_test("*") {
+        info!(
+            r#"skipping all tests in {} because it's included in skip.yml"#,
+            test.path,
+        );
+        return Ok(());
+    }
+
     let mut path = test_file_path(relative_path)?;
     path = generated_dir.join(path);
     path.set_extension("rs");

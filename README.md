@@ -46,6 +46,11 @@ The following are a list of Cargo features that can be enabled or disabled:
 
 - **native-tls** *(enabled by default)*: Enables TLS functionality provided by `native-tls`.
 - **rustls-tls**: Enables TLS functionality provided by `rustls`.
+- **beta-apis**: Enables beta APIs. Beta APIs are on track to become stable and permanent features. Use them with 
+   caution because it is possible that breaking changes are made to these APIs in a minor version.
+- **experimental-apis**: Enables experimental APIs. Experimental APIs are just that - an experiment. An experimental
+  API might have breaking changes in any future version, or it might even be removed entirely. This feature also
+  enables `beta-apis`.
 
 ## Getting started
 
@@ -61,7 +66,7 @@ that is compatible with the version of Elasticsearch you're using
 
 ```toml
 [dependencies]
-elasticsearch = "7.10.0-alpha.1"
+elasticsearch = "7.11.0-alpha.1"
 ```
 
 The following _optional_ dependencies may also be useful to create requests and read responses

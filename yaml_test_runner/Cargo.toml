@@ -1,6 +1,6 @@
 [package]
 name = "yaml_test_runner"
-version = "7.10.0-alpha.1"
+version = "7.11.0-alpha.1"
 publish = false
 edition = "2018"
 authors = ["Elastic and Contributors"]
@@ -9,13 +9,13 @@ repository = "https://github.com/elastic/elasticsearch-rs"
 license = "Apache-2.0"
 
 [dependencies]
-elasticsearch = { path = "./../elasticsearch" }
+elasticsearch = { path = "./../elasticsearch", features = ["experimental-apis"]}
 api_generator = { path = "./../api_generator" }
 
 base64 = "^0.11"
 clap = "~2"
 failure = "0.1.6"
-itertools = "0.8.2"
+itertools = "0.10.0"
 Inflector = "0.11.4"
 lazy_static = "1.4.0"
 log = "0.4.8"
@@ -38,4 +38,4 @@ flate2 = "~1"
 globset = "~0.4"
 
 [dev-dependencies]
-tokio = { version = "0.2.0", default-features = false, features = ["macros", "tcp", "time"] }
+tokio = { version = "1.0", default-features = false, features = ["macros", "net", "time"] }

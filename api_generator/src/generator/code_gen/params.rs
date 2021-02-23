@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+use crate::generator::code_gen::stability_doc;
 use crate::generator::*;
 use inflector::Inflector;
 use quote::Tokens;
@@ -64,9 +65,14 @@ fn generate_param(tokens: &mut Tokens, e: &ApiEnum) {
         None => None,
     };
 
+    let cfg_attr = e.stability.outer_cfg_attr();
+    let cfg_doc = stability_doc(e.stability);
+
     let generated_enum_tokens = quote!(
-        #[derive(Debug, PartialEq, Deserialize, Serialize, Clone, Copy)]
         #doc
+        #cfg_doc
+        #cfg_attr
+        #[derive(Debug, PartialEq, Deserialize, Serialize, Clone, Copy)]
         pub enum #name {
             #(#[serde(rename = #renames)] #variants),*
         }
